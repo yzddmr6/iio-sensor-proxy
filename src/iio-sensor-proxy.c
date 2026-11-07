@@ -359,9 +359,12 @@ send_dbus_event (SensorData     *data,
 		for (l = clients; l != NULL; l = l->next) {
 			PropertiesMask m, new_mask;
 
+			new_mask = mask & mask_for_sensor_type (i);
+			if (new_mask == 0)
+				continue;
+
 			/* Already have a mask? */
 			m = GPOINTER_TO_UINT (g_hash_table_lookup (ht, l->data));
-			new_mask = mask & mask_for_sensor_type (i);
 			m |= new_mask;
 			g_hash_table_insert (ht, l->data, GUINT_TO_POINTER (m));
 		}
@@ -522,7 +525,8 @@ handle_generic_method_call (SensorData            *data,
 							   NULL);
 		g_hash_table_insert (ht, g_strdup (sender), GUINT_TO_POINTER (watch_id));
 
-		if (driver_type_exists (data, driver_type)) {
+		if (driver_type_exists (data, driver_type) &&
+		    DEVICE_FOR_TYPE(driver_type) != NULL) {
 			SensorDevice *sensor_device = DEVICE_FOR_TYPE(driver_type);
 
 			/* No other clients for this sensor? Start it */
@@ -754,7 +758,17 @@ name_acquired_handler (GDBusConnection *connection,
 		       gpointer         user_data)
 {
 	SensorData *data = user_data;
+	PropertiesMask initial_properties = PROP_ALL;
+	PropertiesMask initial_compass_properties = PROP_ALL_COMPASS;
 	guint i;
+
+	/*
+	 * Synchronous driver discovery can iterate the default main context.  A
+	 * client may therefore claim a sensor after the bus name is owned but
+	 * before discovery/opening has completed.
+	 */
+	for (i = 0; i < NUM_SENSOR_TYPES; i++)
+		data->sensor_startup_dbus_invocations_delayed[i] = g_ptr_array_new ();
 
 	if (!find_sensors (data->client, data))
 		goto bail;
@@ -764,8 +778,6 @@ name_acquired_handler (GDBusConnection *connection,
 
 	for (i = 0; i < NUM_SENSOR_TYPES; i++) {
 		SensorDevice *sensor_device;
-
-		data->sensor_startup_dbus_invocations_delayed[i] = g_ptr_array_new ();
 
 		if (!driver_type_exists (data, i))
 			continue;
@@ -779,13 +791,30 @@ name_acquired_handler (GDBusConnection *connection,
 		}
 
 		DEVICE_FOR_TYPE(i) = sensor_device;
+
+		/*
+		 * Match the hotplug path when Claim arrived re-entrantly during
+		 * coldplug discovery.  Without this, the client remains recorded but
+		 * set_polling(TRUE) is never called.
+		 */
+		if (g_hash_table_size (data->clients[i]) > 0) {
+			data->sensor_startup_dbus_event_delayed[i] = TRUE;
+			driver_set_polling (sensor_device, TRUE);
+
+			if (i == DRIVER_TYPE_COMPASS)
+				initial_compass_properties &= ~mask_for_sensor_type (i);
+			else
+				initial_properties &= ~mask_for_sensor_type (i);
+		}
 	}
 
 	if (!any_sensors_left (data))
 		goto bail;
 
-	send_dbus_event (data, PROP_ALL);
-	send_dbus_event (data, PROP_ALL_COMPASS);
+	if (initial_properties != 0)
+		send_dbus_event (data, initial_properties);
+	if (initial_compass_properties != 0)
+		send_dbus_event (data, initial_compass_properties);
 	return;
 
 bail:
