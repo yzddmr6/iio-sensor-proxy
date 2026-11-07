@@ -29,18 +29,25 @@ static gboolean
 ssc_light_discover (GUdevDevice *device)
 {
 	g_autoptr(SSCSensorLight) sensor = NULL;
+	g_autoptr(GError) error = NULL;
 
 	/* Verify presence of FastRPC device */
 	if (!drv_check_udev_sensor_type (device, "ssc-light", NULL))
 		return FALSE;
 
 	/* Open and close SSC light sensor for discovering */
-	sensor = ssc_sensor_light_new_sync (NULL, NULL);
-	if (!sensor)
+	sensor = ssc_sensor_light_new_sync (NULL, &error);
+	if (!sensor) {
+		g_warning ("SSC light discovery failed: %s",
+		           error ? error->message : "no sensor returned");
 		return FALSE;
+	}
 
-	if (!ssc_sensor_light_close_sync (sensor, NULL, NULL))
+	if (!ssc_sensor_light_close_sync (sensor, NULL, &error)) {
+		g_warning ("SSC light discovery close failed: %s",
+		           error ? error->message : "no error detail");
 		return FALSE;
+	}
 
 	g_debug ("Found SSC light at %s", g_udev_device_get_sysfs_path (device));
 	return TRUE;
