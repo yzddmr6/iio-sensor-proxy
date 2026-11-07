@@ -21,6 +21,8 @@
 typedef struct DrvData {
 	SSCSensorLight *sensor;
 	gulong measurement_id;
+	gboolean polling_requested;
+	gboolean polling_changing;
 } DrvData;
 
 static gboolean
@@ -82,28 +84,39 @@ ssc_light_set_polling (SensorDevice *sensor_device, gboolean state)
 {
 	DrvData *drv_data = (DrvData *) sensor_device->priv;
 	g_autoptr (GError) error = NULL;
-	if (state) {
-		if (drv_data->measurement_id)
-			return;
-		/* Start listening for measurements */
-		drv_data->measurement_id = g_signal_connect (drv_data->sensor,
-					                     "measurement",
-							     G_CALLBACK (measurement_cb),
-							     sensor_device);
-		/* Enable sensor */
-		if (!ssc_sensor_light_open_sync (drv_data->sensor, NULL, &error))
-			g_warning ("Opening SSC light sensor failed: %s", error->message);
-	} else {
-		if (!drv_data->measurement_id)
-			return;
 
-		/* Stop listening for measurements */
-		g_clear_signal_handler (&drv_data->measurement_id, drv_data->sensor);
+	if (!drv_data->sensor)
+		return;
 
-		/* Disable sensor */
-		if (!ssc_sensor_light_close_sync (drv_data->sensor, NULL, &error))
-			g_warning ("Closing SSC light sensor failed: %s", error->message);
+	drv_data->polling_requested = state;
+	/* libssc's synchronous operations dispatch the same main context as
+	 * ClaimLight/ReleaseLight. Finish the current operation before applying
+	 * the latest requested state; nested close must not cancel an open.
+	 */
+	if (drv_data->polling_changing)
+		return;
+
+	drv_data->polling_changing = TRUE;
+	while (!!drv_data->measurement_id != drv_data->polling_requested) {
+		if (drv_data->polling_requested) {
+			drv_data->measurement_id = g_signal_connect (drv_data->sensor,
+			                                           "measurement",
+			                                           G_CALLBACK (measurement_cb),
+			                                           sensor_device);
+			if (!ssc_sensor_light_open_sync (drv_data->sensor, NULL, &error)) {
+				g_clear_signal_handler (&drv_data->measurement_id, drv_data->sensor);
+				g_warning ("Opening SSC light sensor failed: %s", error->message);
+				break;
+			}
+		} else {
+			g_clear_signal_handler (&drv_data->measurement_id, drv_data->sensor);
+			if (!ssc_sensor_light_close_sync (drv_data->sensor, NULL, &error)) {
+				g_warning ("Closing SSC light sensor failed: %s", error->message);
+				break;
+			}
+		}
 	}
+	drv_data->polling_changing = FALSE;
 }
 
 static void
