@@ -124,6 +124,24 @@ class Tests(dbusmock.DBusTestCase):
         self.proxy = None
         self.log = None
         self.daemon = None
+        self.ready_properties = {}
+        # SSC discovery runs nested main loops after the bus name is owned.
+        # Observe its completed capability notification before making claims.
+        self.properties_subscription = self.dbus.signal_subscribe(
+            SP, 'org.freedesktop.DBus.Properties', 'PropertiesChanged',
+            None, None, Gio.DBusSignalFlags.NONE,
+            self.properties_changed, None)
+
+    def properties_changed(self, connection, sender, path, interface, signal,
+                           parameters, user_data):
+        sensor_interface, changed, invalidated = parameters.unpack()
+        for name, value in changed.items():
+            self.ready_properties[(sensor_interface, name)] = value
+
+    def wait_for_sensor(self, name, interface=SP):
+        self.assertEventually(
+            lambda: self.ready_properties.get((interface, name)) is True,
+            'No ready PropertiesChanged notification for ' + name)
 
     def run(self, result=None):
         super(Tests, self).run(result)
@@ -134,6 +152,7 @@ class Tests(dbusmock.DBusTestCase):
                 sys.stderr.write('------------------------------\n')
 
     def tearDown(self):
+        self.dbus.signal_unsubscribe(self.properties_subscription)
         del self.testbed
         self.stop_daemon()
 
@@ -275,6 +294,7 @@ class Tests(dbusmock.DBusTestCase):
              'IIO_SENSOR_PROXY_TYPE', 'ssc-proximity']
         )
         self.start_daemon()
+        self.wait_for_sensor('HasProximity')
         self.assertEqual(self.get_dbus_property('HasAmbientLight'), False)
         self.assertEqual(self.get_dbus_property('HasAccelerometer'), False)
         self.assertEqual(self.get_dbus_property('HasProximity'), True)
@@ -300,6 +320,7 @@ class Tests(dbusmock.DBusTestCase):
              'IIO_SENSOR_PROXY_TYPE', 'ssc-accel']
         )
         self.start_daemon()
+        self.wait_for_sensor('HasAccelerometer')
         self.assertEqual(self.get_dbus_property('HasAmbientLight'), False)
         self.assertEqual(self.get_dbus_property('HasAccelerometer'), True)
         self.assertEqual(self.get_dbus_property('HasProximity'), False)
@@ -321,6 +342,8 @@ class Tests(dbusmock.DBusTestCase):
              'IIO_SENSOR_PROXY_TYPE', 'ssc-light']
         )
         self.start_daemon()
+        self.wait_for_sensor('HasAmbientLight')
+        self.assertNotIn((SP, 'LightLevel'), self.ready_properties)
         self.assertEqual(self.get_dbus_property('HasAmbientLight'), True)
         self.assertEqual(self.get_dbus_property('HasAccelerometer'), False)
         self.assertEqual(self.get_dbus_property('HasProximity'), False)
@@ -345,6 +368,8 @@ class Tests(dbusmock.DBusTestCase):
              'IIO_SENSOR_PROXY_TYPE', 'ssc-compass']
         )
         self.start_daemon()
+        self.wait_for_sensor('HasCompass', SP_COMPASS)
+        self.assertNotIn((SP_COMPASS, 'CompassHeading'), self.ready_properties)
         self.assertEqual(self.get_dbus_property('HasAmbientLight'), False)
         self.assertEqual(self.get_dbus_property('HasAccelerometer'), False)
         self.assertEqual(self.get_dbus_property('HasProximity'), False)
