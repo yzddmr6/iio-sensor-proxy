@@ -51,6 +51,7 @@ if get_option('ssc-support').enabled()
     'drv-ssc-light.c',
     'drv-ssc-accel.c',
     'drv-ssc-compass.c',
+    'drv-ssc-gyro.c',
   ]
 endif
 

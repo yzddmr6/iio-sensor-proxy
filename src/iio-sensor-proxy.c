@@ -32,7 +32,7 @@
 #define SENSOR_PROXY_IFACE_NAME         SENSOR_PROXY_DBUS_NAME
 #define SENSOR_PROXY_COMPASS_IFACE_NAME SENSOR_PROXY_DBUS_NAME ".Compass"
 
-#define NUM_SENSOR_TYPES DRIVER_TYPE_PROXIMITY + 1
+#define NUM_SENSOR_TYPES DRIVER_TYPE_GYRO + 1
 
 typedef struct {
 	GMainLoop *loop;
@@ -65,6 +65,11 @@ typedef struct {
 
 	/* Proximity */
 	gboolean previous_prox_near;
+
+	/* Gyroscope */
+	gdouble previous_gyro_x;
+	gdouble previous_gyro_y;
+	gdouble previous_gyro_z;
 } SensorData;
 
 static const SensorDriver * const drivers[] = {
@@ -84,6 +89,7 @@ static const SensorDriver * const drivers[] = {
 	&ssc_light,
 	&ssc_accel,
 	&ssc_compass,
+	&ssc_gyro,
 #endif
 };
 
@@ -101,6 +107,8 @@ driver_type_to_str (DriverType type)
 		return "compass";
 	case DRIVER_TYPE_PROXIMITY:
 		return "proximity";
+	case DRIVER_TYPE_GYRO:
+		return "gyroscope";
 	default:
 		g_assert_not_reached ();
 	}
@@ -198,6 +206,8 @@ typedef enum {
 	PROP_HAS_PROXIMITY              = 1 << 6,
 	PROP_PROXIMITY_NEAR             = 1 << 7,
 	PROP_ACCELEROMETER_TILT         = 1 << 8,
+	PROP_HAS_GYRO                   = 1 << 9,
+	PROP_ANGULAR_VELOCITY           = 1 << 10,
 } PropertiesMask;
 
 #define PROP_ALL (PROP_HAS_ACCELEROMETER | \
@@ -206,7 +216,9 @@ typedef enum {
                   PROP_LIGHT_LEVEL | \
                   PROP_HAS_PROXIMITY | \
 		  PROP_PROXIMITY_NEAR | \
-                  PROP_ACCELEROMETER_TILT)
+                  PROP_ACCELEROMETER_TILT | \
+                  PROP_HAS_GYRO | \
+                  PROP_ANGULAR_VELOCITY)
 #define PROP_ALL_COMPASS (PROP_HAS_COMPASS | \
 			  PROP_COMPASS_HEADING)
 
@@ -227,6 +239,9 @@ mask_for_sensor_type (DriverType sensor_type)
 	case DRIVER_TYPE_PROXIMITY:
 		return PROP_HAS_PROXIMITY |
 			PROP_PROXIMITY_NEAR;
+	case DRIVER_TYPE_GYRO:
+		return PROP_HAS_GYRO |
+			PROP_ANGULAR_VELOCITY;
 	default:
 		g_assert_not_reached ();
 	}
@@ -324,6 +339,27 @@ send_dbus_event_for_client (SensorData     *data,
 				       g_variant_new_boolean (data->previous_prox_near));
 	}
 
+	if (mask & PROP_HAS_GYRO) {
+		gboolean has_gyro;
+
+		has_gyro = driver_type_exists (data, DRIVER_TYPE_GYRO);
+		g_variant_builder_add (&props_builder, "{sv}", "HasGyroscope",
+				       g_variant_new_boolean (has_gyro));
+
+		/* Send the angular velocity when the device appears */
+		if (has_gyro)
+			mask |= PROP_ANGULAR_VELOCITY;
+	}
+
+	if (mask & PROP_ANGULAR_VELOCITY) {
+		g_variant_builder_add (&props_builder, "{sv}", "AngularVelocityX",
+				       g_variant_new_double (data->previous_gyro_x));
+		g_variant_builder_add (&props_builder, "{sv}", "AngularVelocityY",
+				       g_variant_new_double (data->previous_gyro_y));
+		g_variant_builder_add (&props_builder, "{sv}", "AngularVelocityZ",
+				       g_variant_new_double (data->previous_gyro_z));
+	}
+
 	props_changed = g_variant_new ("(s@a{sv}@as)", (mask & PROP_ALL) ? SENSOR_PROXY_IFACE_NAME : SENSOR_PROXY_COMPASS_IFACE_NAME,
 				       g_variant_builder_end (&props_builder),
 				       g_variant_new_strv (NULL, 0));
@@ -351,11 +387,13 @@ send_dbus_availability_event (SensorData *data, PropertiesMask mask)
 		{ PROP_HAS_AMBIENT_LIGHT, DRIVER_TYPE_LIGHT, "HasAmbientLight" },
 		{ PROP_HAS_PROXIMITY, DRIVER_TYPE_PROXIMITY, "HasProximity" },
 		{ PROP_HAS_COMPASS, DRIVER_TYPE_COMPASS, "HasCompass" },
+		{ PROP_HAS_GYRO, DRIVER_TYPE_GYRO, "HasGyroscope" },
 	};
 	GVariantBuilder builder;
 
 	if (!(mask & (PROP_HAS_ACCELEROMETER | PROP_HAS_AMBIENT_LIGHT |
-	              PROP_HAS_PROXIMITY | PROP_HAS_COMPASS)))
+	              PROP_HAS_PROXIMITY | PROP_HAS_COMPASS |
+	              PROP_HAS_GYRO)))
 		return;
 	g_variant_builder_init (&builder, G_VARIANT_TYPE ("a{sv}"));
 	for (guint i = 0; i < G_N_ELEMENTS (properties); i++) {
@@ -633,6 +671,9 @@ handle_method_call (GDBusConnection       *connection,
 	else if (g_strcmp0 (method_name, "ClaimProximity") == 0 ||
 		 g_strcmp0 (method_name, "ReleaseProximity") == 0)
 	        driver_type = DRIVER_TYPE_PROXIMITY;
+	else if (g_strcmp0 (method_name, "ClaimGyroscope") == 0 ||
+		 g_strcmp0 (method_name, "ReleaseGyroscope") == 0)
+	        driver_type = DRIVER_TYPE_GYRO;
 	else {
 		g_dbus_method_invocation_return_error (invocation,
 						       G_DBUS_ERROR,
@@ -681,6 +722,14 @@ handle_get_property (GDBusConnection *connection,
 		return g_variant_new_boolean (driver_type_exists (data, DRIVER_TYPE_PROXIMITY));
 	if (g_strcmp0 (property_name, "ProximityNear") == 0)
 		return g_variant_new_boolean (data->previous_prox_near);
+	if (g_strcmp0 (property_name, "HasGyroscope") == 0)
+		return g_variant_new_boolean (driver_type_exists (data, DRIVER_TYPE_GYRO));
+	if (g_strcmp0 (property_name, "AngularVelocityX") == 0)
+		return g_variant_new_double (data->previous_gyro_x);
+	if (g_strcmp0 (property_name, "AngularVelocityY") == 0)
+		return g_variant_new_double (data->previous_gyro_y);
+	if (g_strcmp0 (property_name, "AngularVelocityZ") == 0)
+		return g_variant_new_double (data->previous_gyro_z);
 
 	return NULL;
 }
@@ -1056,6 +1105,32 @@ proximity_changed_func (SensorDevice *sensor_device,
 	maybe_notify_sensor_startup_finished (data, DRIVER_TYPE_PROXIMITY);
 }
 
+static void
+gyro_changed_func (SensorDevice *sensor_device,
+                   gpointer      readings_data,
+                   gpointer      user_data)
+{
+	SensorData *data = user_data;
+	GyroscopeReadings *readings = (GyroscopeReadings *) readings_data;
+
+	//FIXME handle errors
+	g_debug ("Angular velocity sent by driver: %lf, %lf, %lf rad/s",
+	         readings->x, readings->y, readings->z);
+
+	if (data->previous_gyro_x != readings->x ||
+	    data->previous_gyro_y != readings->y ||
+	    data->previous_gyro_z != readings->z) {
+		data->previous_gyro_x = readings->x;
+		data->previous_gyro_y = readings->y;
+		data->previous_gyro_z = readings->z;
+
+		send_dbus_event (data, PROP_ANGULAR_VELOCITY);
+		g_debug ("Emitted angular velocity changed");
+	}
+
+	maybe_notify_sensor_startup_finished (data, DRIVER_TYPE_GYRO);
+}
+
 static ReadingsUpdateFunc
 driver_type_to_callback_func (DriverType type)
 {
@@ -1068,6 +1143,8 @@ driver_type_to_callback_func (DriverType type)
 		return compass_changed_func;
 	case DRIVER_TYPE_PROXIMITY:
 		return proximity_changed_func;
+	case DRIVER_TYPE_GYRO:
+		return gyro_changed_func;
 	default:
 		g_assert_not_reached ();
 	}

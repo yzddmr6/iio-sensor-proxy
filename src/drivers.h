@@ -17,6 +17,7 @@ typedef enum {
 	DRIVER_TYPE_LIGHT,
 	DRIVER_TYPE_COMPASS,
 	DRIVER_TYPE_PROXIMITY,
+	DRIVER_TYPE_GYRO,
 } DriverType;
 
 typedef enum {
@@ -46,6 +47,12 @@ typedef struct {
 typedef struct {
 	ProximityNear is_near;
 } ProximityReadings;
+
+typedef struct {
+	gdouble x;
+	gdouble y;
+	gdouble z;
+} GyroscopeReadings;
 
 typedef void (*ReadingsUpdateFunc) (SensorDevice *sensor_device,
 				    gpointer      readings,
@@ -166,6 +173,7 @@ extern SensorDriver ssc_proximity;
 extern SensorDriver ssc_light;
 extern SensorDriver ssc_accel;
 extern SensorDriver ssc_compass;
+extern SensorDriver ssc_gyro;
 #endif
 
 gboolean drv_check_udev_sensor_type (GUdevDevice *device, const gchar *match, const char *name);
